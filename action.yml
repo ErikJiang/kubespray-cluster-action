@@ -1,0 +1,167 @@
+name: 'Deploy Kubernetes with Kubespray'
+description: 'Deploy a Kubernetes cluster in a Docker container using Kubespray'
+inputs:
+  kubespray-version:
+    description: 'Kubespray git SHA to use'
+    required: true
+  container-name:
+    description: 'Name of the container to create'
+    required: false
+    default: 'kubespray-node'
+outputs:
+  container-ip:
+    description: 'IP address of the container'
+    value: ${{ steps.container-info.outputs.ip }}
+  kubeconfig-path:
+    description: 'Path to the kubeconfig file'
+    value: ${{ steps.setup-kubectl.outputs.kubeconfig-path }}
+
+runs:
+  using: 'composite'
+  steps:
+  - name: Start container
+    id: start-container
+    shell: bash
+    run: |
+      docker network create kubespray-net || true
+      #       --pid host \
+      docker run -d \
+        --name ${{ inputs.container-name }} \
+        --hostname ${{ inputs.container-name }} \
+        --privileged \
+        --security-opt "seccomp=unconfined" \
+        --security-opt "apparmor=unconfined" \
+        --security-opt "label=disable" \
+        --ipc private \
+        --cgroupns host \
+        --shm-size 64m \
+        --network kubespray-net \
+        --tmpfs /tmp:rw,rprivate,nosuid,nodev \
+        --tmpfs /run:rw,rprivate,nosuid,nodev \
+        --volume /dev/mapper:/dev/mapper \
+        --volume /lib/modules:/lib/modules:ro \
+        --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+        --volume /var/lib/docker \
+        --publish 6443:6443 \
+        --expose "6443/tcp" \
+        ghcr.io/erikjiang/systemd-node:${{ github.sha }} \
+        /sbin/init
+
+  - name: Get container info
+    id: container-info
+    shell: bash
+    run: |
+      CONTAINER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' ${{ inputs.container-name }})
+      echo "ip=$CONTAINER_IP" >> $GITHUB_OUTPUT
+
+  - name: Setup SSH
+    id: setup-ssh
+    shell: bash
+    run: |
+      echo "Generating SSH key pair..."
+      mkdir -p ~/.ssh
+      ssh-keygen -t rsa -b 4096 -f $HOME/.ssh/id_rsa_kubespray -N ""
+      chmod 600 $HOME/.ssh/id_rsa_kubespray
+
+      echo "Waiting for container services..."
+      sleep 15
+
+      sudo sshpass -p "kubespray" ssh-copy-id \
+        -i $HOME/.ssh/id_rsa_kubespray.pub \
+        -o StrictHostKeyChecking=no \
+        root@${{ steps.container-info.outputs.ip }}
+
+  - name: Set up Python
+    uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+    with:
+      python-version: '3.10'
+
+  - name: Checkout Kubespray
+    uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    with:
+      repository: kubernetes-sigs/kubespray
+      ref: ${{ inputs.kubespray-version }}
+      path: kubespray
+      fetch-depth: 1
+      persist-credentials: false
+
+  - name: Setup Kubespray
+    shell: bash
+    run: |
+      python -m venv kubespray-venv
+      source kubespray-venv/bin/activate
+      cd kubespray
+      pip install -r requirements.txt
+
+  - name: Deploy Kubernetes
+    shell: bash
+    run: |
+      source kubespray-venv/bin/activate
+      cd kubespray
+
+      # Create inventory
+      cp -rfp inventory/sample inventory/mycluster
+      cat > inventory/mycluster/hosts.yaml << EOF
+      all:
+        hosts:
+          ${{ inputs.container-name }}:
+            ansible_host: ${{ steps.container-info.outputs.ip }}
+            ip: ${{ steps.container-info.outputs.ip }}
+            ansible_user: root
+            ansible_ssh_private_key_file: $HOME/.ssh/id_rsa_kubespray
+            ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+        children:
+          kube_control_plane:
+            hosts:
+              ${{ inputs.container-name }}:
+          kube_node:
+            hosts:
+              ${{ inputs.container-name }}:
+          etcd:
+            hosts:
+              ${{ inputs.container-name }}:
+          k8s_cluster:
+            children:
+              kube_control_plane:
+              kube_node:
+          calico_rr:
+            hosts: {}
+      EOF
+
+      # Run ansible-playbook
+      ansible -i inventory/mycluster/hosts.yaml all -m ping -vvv
+
+      ansible-playbook -i inventory/mycluster/hosts.yaml cluster.yml -b -vvv \
+        -e '{"kube_network_plugin": "cni"}' \
+        -e '{"kube_owner": "root"}' \
+        -e '{"resolvconf_mode": "none"}' \
+        -e '{"kubeadm_ignore_preflight_errors": ["SystemVerification"]}' \
+        -e '{"enable_nodelocaldns": false}' \
+        -e '{"etcd_deployment_type": "kubeadm"}' \
+        -e '{"kubelet_fail_swap_on": false}'
+
+  # - name: Setup tmate session
+  #   if: ${{ always() }}
+  #   uses: mxschmitt/action-tmate@v3
+
+  - name: Get kubeconfig
+    id: setup-kubectl
+    shell: bash
+    run: |
+      mkdir -p ~/.kube
+      docker cp ${{ inputs.container-name }}:/etc/kubernetes/admin.conf ~/.kube/config
+
+      # Update server address in kubeconfig
+      sed -i "s/server: https:\/\/.*:/server: https:\/\/${{ steps.container-info.outputs.ip }}:6443/g" ~/.kube/config
+      echo "kubeconfig-path=$HOME/.kube/config" >> $GITHUB_OUTPUT
+
+      # Copy kubectl binary from container
+      docker cp ${{ inputs.container-name }}:/usr/local/bin/kubectl /usr/local/bin/
+      chmod +x /usr/local/bin/kubectl
+
+  - name: Test kubectl
+    shell: bash
+    run: |
+      export KUBECONFIG=~/.kube/config
+      kubectl get nodes
+      kubectl get pods --all-namespaces

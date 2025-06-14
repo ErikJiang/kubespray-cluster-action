@@ -1,0 +1,91 @@
+# 通常 kindest/base 会有一个基础镜像定义，例如：
+ARG BASE_IMAGE_VERSION=22.04 # 示例版本
+ARG BASE_IMAGE=ubuntu:${BASE_IMAGE_VERSION}
+FROM ${BASE_IMAGE}
+
+# 设置必要的环境变量 (通常存在于原始 kindest/base)
+ENV DEBIAN_FRONTEND=noninteractive \
+    TERM=xterm-256color
+
+# --- 保留：基础包安装和更新 ---
+# (这部分内容通常在 kindest/base 的开头，用于准备编译环境和基础工具)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    apt-utils \
+    ca-certificates \
+    curl \
+    gnupg \
+    # ... 其他 kindest/base 可能包含的基础工具，例如 build-essential, git, jq 等，可酌情保留或移除 ...
+    # --- 确保添加/保留 Kubespray 必需的依赖 ---
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-apt \
+    openssh-server \
+    sudo \
+    iproute2 \
+    socat \
+    ebtables \
+    ethtool \
+    conntrack \
+    bash-completion \
+    # nfs-common, ceph-common, lvm2, iscsi-initiator-utils 等根据需要添加
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# --- 移除/注释掉：KIND 特有的 Go 版本管理和编译工具安装 (如果不需要在节点上编译 Go 应用) ---
+# ARG GO_VERSION_MAJOR=...
+# ARG GO_VERSION_MINOR=...
+# ... (相关 Go 安装步骤) ...
+
+# --- 移除/注释掉：容器运行时 (containerd, runc) 的安装 ---
+# Kubespray 会自行安装和配置所选的容器运行时。
+# RUN ... (下载和安装 containerd, runc 的命令) ...
+# RUN ... (配置 containerd 的命令, 如写入 /etc/containerd/config.toml) ...
+
+# --- 移除/注释掉：CNI 基础插件的安装 ---
+# Kubespray 会安装其选定的 CNI 插件及其依赖。
+# RUN ... (下载和安装 CNI 插件 (bridge, host-local 等) 的命令) ...
+
+# --- 移除/注释掉：Kubernetes 二进制文件 (kubelet, kubeadm, kubectl) 的安装 ---
+# Kubespray 会下载并配置其管理版本的 Kubernetes 组件。
+# ARG KUBE_VERSION=...
+# RUN ... (下载和安装 kubelet, kubeadm, kubectl 的命令) ...
+# RUN ... (可能存在的 systemd unit 文件创建或 kubelet 配置步骤) ...
+
+# --- 移除/注释掉：KIND 特定的脚本或配置 ---
+# 例如，KIND 可能会有自己的 entrypoint 脚本或预配置的网络接口。
+# RUN rm -f /usr/local/bin/entrypoint /usr/local/bin/kind # 示例
+# COPY ... (KIND 特定的脚本或配置文件) ...
+
+# --- 新增/确保：SSH 服务配置 ---
+RUN mkdir -p /var/run/sshd && \
+    # 允许 root 用户通过密码或密钥登录 (Kubespray 通常需要 root 权限或无密码 sudo)
+    (grep -q "^#\?PermitRootLogin" /etc/ssh/sshd_config && \
+     sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config) || \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    # 确保 PasswordAuthentication 启用 (如果需要密码登录)
+    (grep -q "^#\?PasswordAuthentication" /etc/ssh/sshd_config && \
+     sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config) || \
+    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
+    # 生成 SSH host keys (如果不存在)
+    ssh-keygen -A
+
+# --- (可选) 新增：创建 Kubespray 使用的非 root 用户并配置无密码 sudo ---
+# ARG KUBE_USER=kubespray_user
+# RUN useradd --create-home --shell /bin/bash ${KUBE_USER} && \
+#     echo "${KUBE_USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${KUBE_USER} && \
+#     mkdir -p /home/${KUBE_USER}/.ssh && \
+#     chown -R ${KUBE_USER}:${KUBE_USER} /home/${KUBE_USER}/.ssh && \
+#     chmod 700 /home/${KUBE_USER}/.ssh
+# USER ${KUBE_USER}
+# WORKDIR /home/${KUBE_USER}
+# EXPOSE 22
+# CMD ["/usr/sbin/sshd", "-D"]
+# 如果使用非 root 用户，请确保 Kubespray 的 ansible_user 配置正确。
+
+# --- 保留/调整：清理工作 (通常在 kindest/base 的末尾) ---
+# RUN apt-get autoremove -y && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# --- 修改：容器启动命令，使其作为 SSH 可访问节点运行 ---
+# 如果上面配置了非 root 用户，CMD 应在该用户上下文中执行或调整
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D"]
