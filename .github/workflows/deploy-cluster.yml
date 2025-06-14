@@ -1,0 +1,58 @@
+name: Deploy Kubernetes
+
+on:
+  workflow_dispatch:
+    inputs:
+      kubespray-version:
+        description: 'Kubespray git SHA'
+        required: true
+        default: 63cdf87915421dda5955281f38401fd1b55b230b # v2.28.0
+      enable-tmate:
+        description: 'enable tmate session for debugging'
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches:
+      - 'main'
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+jobs:
+  build-image:
+    uses: ./.github/workflows/build-image.yml
+    secrets: inherit
+
+  deploy:
+    needs: build-image
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Set up job
+        run: |
+          echo "ACTIONS_RUNNER_DEBUG=true" >> $GITHUB_ENV
+          echo "ACTIONS_STEP_DEBUG=true" >> $GITHUB_ENV
+
+      - name: Collect Workflow Telemetry
+        uses: catchpoint/workflow-telemetry-action@94c3c3d9567a0205de6da68a76c428ce4e769af1 # v2.0.0
+        with:
+          comment_on_pr: false
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        
+      - name: Deploy Kubernetes with Kubespray
+        uses: ./
+        with:
+          kubespray-version: ${{ github.event.inputs.kubespray-version }}
+          
+      - name: Verify Kubernetes
+        run: |
+          kubectl get nodes -o wide
+          kubectl get pods --all-namespaces
+
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.enable-tmate == 'true' }}

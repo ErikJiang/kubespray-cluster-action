@@ -1,0 +1,55 @@
+name: 'Deploy Kubernetes with Kubespray'
+description: 'Deploy a Kubernetes cluster in a Docker container using Kubespray'
+inputs:
+  kubespray-version:
+    description: 'Kubespray git SHA to use'
+    required: true
+  container-name:
+    description: 'Name of the container to create'
+    required: false
+    default: 'kubespray-node'
+outputs:
+  container-ip:
+    description: 'IP address of the container'
+    value: ${{ steps.prepare_node.outputs.container_ip }}
+  kubeconfig-path:
+    description: 'Path to the kubeconfig file'
+    value: ${{ steps.deploy_cluster.outputs.kubeconfig_path }}
+
+runs:
+  using: 'composite'
+  steps:
+  - name: Prepare Node and Setup SSH
+    id: prepare_node
+    shell: bash
+    env:
+      INPUT_CONTAINER_NAME: ${{ inputs.container-name }}
+      IMAGE_TAG: ${{ github.sha }}
+    run: |
+      set -e
+      bash ${{ github.action_path }}/scripts/prepare-node.sh
+
+  - name: Set up Python
+    uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+    with:
+      python-version: '3.10'
+
+  - name: Checkout Kubespray
+    uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+    with:
+      repository: kubernetes-sigs/kubespray
+      ref: ${{ inputs.kubespray-version }}
+      path: kubespray
+      fetch-depth: 1
+      persist-credentials: false
+
+  - name: Deploy Kubespray Cluster
+    id: deploy_cluster
+    shell: bash
+    env:
+      INPUT_CONTAINER_NAME: ${{ inputs.container-name }}
+      CONTAINER_IP: ${{ steps.prepare_node.outputs.container_ip }}
+      KUBESPRAY_DIR: ${{ github.workspace }}/kubespray
+    run: |
+      set -e
+      bash ${{ github.action_path }}/scripts/deploy-kubespray.sh

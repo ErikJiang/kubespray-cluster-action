@@ -1,1 +1,3 @@
-# kubespray-cluster-action
+# Kubespray Cluster Action
+
+Deploys Kubernetes in Docker using Kubespray.
